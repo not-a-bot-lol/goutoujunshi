@@ -1,45 +1,74 @@
 # -*- coding: utf-8 -*-
-"""找微信窗口 + Windows Graphics Capture 盯着它 + 从帧里定位消息区。帧全程内存，绝不落盘。"""
+"""找微信或 QQ 窗口 + Windows Graphics Capture 盯着它 + 从帧里定位消息区。帧全程内存，绝不落盘。"""
 import ctypes
+import ctypes.wintypes as w
 import os
 import time
 
 import numpy as np
 
+from app.targets import ChatHit, app_for_exe, choose_hit
+
 u32 = ctypes.windll.user32
+u32.GetForegroundWindow.restype = ctypes.c_void_p
 
 
-def find_wechat_hwnd():
-    """枚举可见顶层窗口，进程是 Weixin.exe/WeChat.exe 的里挑标题「微信」的（主窗口），没有就取第一个。
-    同进程还有 'Weixin'（工具窗）、'图片和视频'（看图窗）等，面积可能更大，所以不能按面积挑。"""
+def _exe_of(pid):
     k32 = ctypes.windll.kernel32
-    found = []
+    handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    buf, size = ctypes.create_unicode_buffer(1024), ctypes.c_uint(1024)
+    ok = k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+    k32.CloseHandle(handle)
+    return os.path.basename(buf.value).lower() if ok else ""
 
-    def exe_of(pid):
-        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
-            return ""
-        buf, size = ctypes.create_unicode_buffer(1024), ctypes.c_uint(1024)
-        ok = k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
-        k32.CloseHandle(h)
-        return os.path.basename(buf.value).lower() if ok else ""
+
+def _area(hwnd):
+    rect = w.RECT()
+    if not u32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return 0
+    return max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+
+
+def list_chat_windows():
+    """可见顶层窗口里，进程是微信或 QQ 的，按 Z 序从上到下。"""
+    found = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def cb(hwnd, _):
-        if not u32.IsWindowVisible(hwnd):
+        if not hwnd or not u32.IsWindowVisible(hwnd):
             return True
         pid = ctypes.c_ulong()
         u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if exe_of(pid.value) in ("weixin.exe", "wechat.exe"):
-            title = ctypes.create_unicode_buffer(256)
-            u32.GetWindowTextW(hwnd, title, 256)
-            found.append((hwnd, title.value))
+        app = app_for_exe(_exe_of(pid.value))
+        if app is None:
+            return True
+        title = ctypes.create_unicode_buffer(256)
+        u32.GetWindowTextW(hwnd, title, 256)
+        found.append(ChatHit(int(hwnd), app, title.value, _area(hwnd)))
         return True
 
     u32.EnumWindows(cb, 0)
-    if not found:
+    return found
+
+
+def find_chat_window(prefer_hwnd=None):
+    """前台是微信或 QQ 就跟前台；否则留在上次那个；都没有就取最上面的主窗口。"""
+    foreground = u32.GetForegroundWindow()
+    hit = choose_hit(list_chat_windows(), foreground, prefer_hwnd)
+    if hit is None:
+        raise RuntimeError("没找到微信或 QQ 的可见窗口，请先打开其中一个并保持聊天窗口可见")
+    return hit
+
+
+def find_wechat_hwnd():
+    """兼容旧调用：只要微信主窗口。"""
+    wechat = [hit for hit in list_chat_windows() if hit.app["id"] == "wechat"]
+    hit = choose_hit(wechat)
+    if hit is None:
         raise RuntimeError("没找到 Weixin.exe / WeChat.exe 的可见窗口，微信开着吗？")
-    return next((h for h, t in found if t == "微信"), found[0][0])
+    return hit.hwnd
 
 
 def unminimize(hwnd):

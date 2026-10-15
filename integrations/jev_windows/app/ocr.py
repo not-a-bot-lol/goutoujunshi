@@ -5,7 +5,8 @@ import re
 import time
 
 import numpy as np
-from rapidocr_onnxruntime import RapidOCR
+
+from app.bubble import is_self_bubble
 
 
 _ENGINE = None
@@ -16,6 +17,8 @@ def _engine():
     det_limit_type 默认 'min' 会把小图放大到短边 736，裁小反而更慢；必须 'max'。"""
     global _ENGINE
     if _ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
+
         _ENGINE = RapidOCR(intra_op_num_threads=4, det_limit_type="max", det_limit_side_len=4000)
     return _ENGINE
 
@@ -36,8 +39,8 @@ def read_title(header):
 def who_said(chat, box):
     """按 OCR 框里的颜色分类，不看 x 坐标。返回 (谁, 底色, 墨高)：
     先看底色平不平：框里众数颜色占比 <45% 就是图片（头像/照片/表情包）里的字 → None 丢掉。
-    绿底 → me；非绿且文字对底色对比度 ≥150 → her；其余（引用块、群里的发言人名、时间戳、系统提示、
-    链接卡片描述——都是灰字，对比度 80~95）→ "gray"。
+    绿底（微信）或蓝/青底（QQ）→ me；其余文字对底色对比度 ≥150 → her；
+    其余（引用块、群里的发言人名、时间戳、系统提示、链接卡片描述——都是灰字，对比度 80~95）→ "gray"。
     实测：气泡正文对比度 178~208，me 绿泡 142~150，灰字 ≤ 93。深浅主题都靠这套。
     墨高 = 框里最长一段连续有字的行数（OCR 框对小字有固定 padding、还会蹭到上下行，不能拿框高比大小）。"""
     xs, ys = [p[0] for p in box], [p[1] for p in box]
@@ -56,7 +59,7 @@ def who_said(chat, box):
     for r in (diff > 60).any(axis=1):
         best = best + 1 if r else 0
         ink_h = max(ink_h, best)
-    if bg[1] > bg[0] + 40 and bg[1] > bg[2] + 40:
+    if is_self_bubble(bg):
         return "me", bg, ink_h
     return ("her" if diff.max() >= 150 else "gray"), bg, ink_h
 

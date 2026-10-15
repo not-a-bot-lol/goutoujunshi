@@ -7,16 +7,41 @@ key 的持久化走 Windows 用户环境变量（注册表 HKCU\\Environment，�
 只靠 os.environ 会「保存了下次打开还是没有」。"""
 from __future__ import annotations
 
-import ctypes
 import json
 import os
-import sys  # 只为下面这一处：打包后 __file__ 指向临时解包目录，config.json 得放在 exe 旁边才存得住
+import sys
 
 from core.providers import CUSTOM, DRAFT_PROVIDERS, JEV_ENV, JEV_PROVIDERS, LEGACY, LLM_ENV, DEEPSEEK_STRATEGY_ENV, OCR_ENV
 
-_ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
-         else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_CONFIG = os.path.join(_ROOT, "config.json")
+# 同一台电脑、同一个 Windows 用户下次打开还在。放在用户目录，而不是 exe 旁边：
+# 重新解压程序文件夹不会把设置清掉。密钥仍只进注册表，不进这个文件。
+_CONFIG = None
+
+
+def _legacy_config() -> str:
+    root = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "config.json")
+
+
+def config_path() -> str:
+    """%APPDATA%\\goutoujunshi-jev-chat\\config.json。旧的 exe 旁边那份只搬一次。"""
+    global _CONFIG
+    if _CONFIG:
+        return _CONFIG
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(base, "goutoujunshi-jev-chat")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "config.json")
+    legacy = _legacy_config()
+    if not os.path.exists(path) and os.path.isfile(legacy) and os.path.abspath(legacy) != os.path.abspath(path):
+        try:
+            with open(legacy, encoding="utf-8") as src, open(path, "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+        except OSError:
+            path = legacy
+    _CONFIG = path
+    return path
 _DEFAULT_RELATIONSHIP = "romantic partners"
 _DEFAULT_CONTEXT = 10
 _DEFAULT_JEV = "openrouter"
@@ -28,7 +53,7 @@ GOALS = ("自然接话", "主动邀约", "澄清关系", "修复冲突", "减少
 def _read(name: str, default=None):
     """读 config.json 里的一个字段；每次都重新读文件，改设置不用重启进程。"""
     try:
-        with open(_CONFIG, encoding="utf-8") as f:
+        with open(config_path(), encoding="utf-8") as f:
             value = json.load(f).get(name)
     except (OSError, ValueError):
         return default
@@ -62,7 +87,7 @@ def save_profile(title: str, stage: str, goal: str, background: str) -> None:
     if not title or len(title) > 200 or stage not in STAGES or goal not in GOALS or len(background) > 200:
         raise ValueError("请确认会话、阶段和目标；补充背景最多 200 字")
     try:
-        with open(_CONFIG, encoding="utf-8") as handle:
+        with open(config_path(), encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, ValueError):
         data = {}
@@ -71,7 +96,7 @@ def save_profile(title: str, stage: str, goal: str, background: str) -> None:
         profiles = {}
     profiles[title] = {"stage": stage, "goal": goal, "background": background}
     data["profiles"] = profiles
-    with open(_CONFIG, "w", encoding="utf-8") as handle:
+    with open(config_path(), "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False)
 
 def profile_context(title: str) -> str:
@@ -171,17 +196,16 @@ def _get_key(env_name: str) -> str:
     return _read_env(env_name)
 
 def _set_key(env_name: str, value: str) -> None:
-    """只写进程环境 + HKCU\\Environment，不写任何文件。"""
-    os.environ[env_name] = value
-    try:
-        import winreg
+    """只写进程环境 + HKCU\\Environment，不写任何文件。
 
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as k:
-            winreg.SetValueEx(k, env_name, 0, winreg.REG_SZ, value)
-        # 广播一下，之后新开的终端/进程就能看到；已经开着的 IDE 看不到也无所谓，启动时会读注册表
-        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x1A, 0, "Environment", 2, 5000, None)
-    except Exception:
-        pass  # 非 Windows（本机 Mac 开发）走不到，忽略
+    不广播 WM_SETTINGCHANGE。那条消息会同步发给本程序自己的窗口，在保存按钮的
+    界面线程里重入，直接把进程打崩，后面的 config.json 也就来不及写。
+    本程序下次启动自己读注册表，不依赖这条广播。"""
+    os.environ[env_name] = value
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, env_name, 0, winreg.REG_SZ, value)
 
 def jev_key() -> str:
     """判断那把 key，两家来源共用。"""
@@ -241,5 +265,5 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "debug_view": flag(debug_view_on, debug_view),
         "profiles": _read("profiles", {}) if isinstance(_read("profiles", {}), dict) else {},
     }
-    with open(_CONFIG, "w", encoding="utf-8") as f:
+    with open(config_path(), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)

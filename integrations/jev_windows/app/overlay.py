@@ -136,8 +136,8 @@ class _ReplyCard(_Surface):
         self.reasonButton.clicked.connect(lambda: owner._explain(index))
         bottom.addWidget(self.reasonButton)
         bottom.addStretch(1)
-        self.fillButton = (PrimaryPushButton if recommended else PushButton)("填入微信", self)
-        self.fillButton.setAccessibleName(f"填入{'推荐回复' if recommended else f'备选 {number}'}到微信")
+        self.fillButton = (PrimaryPushButton if recommended else PushButton)("填入草稿", self)
+        self.fillButton.setAccessibleName(f"填入{'推荐回复' if recommended else f'备选 {number}'}到输入框")
         self.fillButton.clicked.connect(lambda: owner._fill(index))
         bottom.addWidget(self.fillButton)
         box.addLayout(bottom)
@@ -185,7 +185,7 @@ class Overlay:
         self.counts = {}  # {会话名: 消息条数}
         self.hers = {}  # {会话名: 对方最近一句}
         self.targets = {}  # {会话名: ([发言人], 当前回复对象)}
-        self._chat = ""  # 微信当前开着的会话
+        self._chat = ""  # 当前聊天窗口开着的会话
         self._shown = ""  # 界面上正在看的会话（浏览时和上面不一样）
         self.win = _MainWindow(self._relayout)
         self.win.setObjectName("assistantWindow")
@@ -213,8 +213,8 @@ class Overlay:
         self.captureSwitch = SwitchButton(header)
         self.captureSwitch.setOnText("采集中")
         self.captureSwitch.setOffText("已暂停")
-        self.captureSwitch.setToolTip("开启或暂停微信采集")
-        self.captureSwitch.setAccessibleName("开启或暂停微信采集")
+        self.captureSwitch.setToolTip("开启或暂停微信 / QQ 采集")
+        self.captureSwitch.setAccessibleName("开启或暂停微信 / QQ 采集")
         self.captureSwitch.setChecked(True)
         self.captureSwitch.checkedChanged.connect(self._capture_toggled)
         title.addWidget(self.captureSwitch)
@@ -323,7 +323,7 @@ class Overlay:
         self.chatBox.setMinimumWidth(0)  # 别让会话名的长度撑开整行，宽度交给 stretch
         self.chatBox.setPlaceholderText("尚未识别到会话")
         self.chatBox.setAccessibleName("当前会话")
-        self.chatBox.setToolTip("微信切到哪个会话这里就跟到哪个；也可以自己选一个，只看它的记录和建议")
+        self.chatBox.setToolTip("微信或 QQ 切到哪个会话这里就跟到哪个；也可以自己选一个，只看它的记录和建议")
         self.chatBox.currentIndexChanged.connect(self._on_chat_selected)
         chat_row.addWidget(self.chatBox, 1)
         self.chatFollow = _label("", 11, _MUTED)
@@ -346,7 +346,7 @@ class Overlay:
         target_row.addWidget(self.targetBox, 1)
         self.atCheck = CheckBox("填入时带 @")
         self.atCheck.setChecked(True)
-        self.atCheck.setToolTip("填入时在开头加「@名字 」。只是普通文字，微信不会认成真正的 @")
+        self.atCheck.setToolTip("填入时在开头加「@名字 」。只是普通文字，不会变成真正的 @")
         target_row.addWidget(self.atCheck)
         self.targetRow.hide()
         body.addWidget(self.targetRow)
@@ -406,7 +406,7 @@ class Overlay:
         self.emptyTitle = _label("等待对方的新消息", 17, "#304c3c", True)
         self.emptyTitle.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyTitle)
-        self.emptyHint = _label("保持微信聊天窗口打开。\n收到新消息后，回复建议会出现在这里。", 13, _MUTED)
+        self.emptyHint = _label("保持微信或 QQ 的聊天窗口打开。\n收到新消息后，回复建议会出现在这里。", 13, _MUTED)
         self.emptyHint.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyHint)
         self.setupButton = PrimaryPushButton("前往设置")
@@ -908,7 +908,11 @@ class Overlay:
             return
         self._load_settings()
         if self.on_settings_saved:
-            self.on_settings_saved()
+            try:
+                self.on_settings_saved()
+            except Exception:
+                self._settings_feedback("设置已保存。采集没有重启成功，关掉再打开一次即可。", error=True)
+                return
         self._render_targets()  # 开关刚改过，回到首页时这一行该显该藏得重算一次
         self._settings_feedback("设置已保存，将用于下一次回复。")
         self.setupButton.hide()
@@ -1021,7 +1025,7 @@ class Overlay:
             return
         if not on:
             self.emptyTitle.setText("采集已暂停")
-            self.emptyHint.setText("微信里的内容暂时不再读取。\n打开标题栏的开关，继续接收新消息。")
+            self.emptyHint.setText("聊天窗口里的内容暂时不再读取。\n打开标题栏的开关，继续接收新消息。")
             self.setupButton.setVisible(not configured)
         else:
             self._empty_text()
@@ -1048,7 +1052,7 @@ class Overlay:
         """空态卡片的默认文案，配好没配好两套说法。"""
         configured = settings.has_key()
         self.emptyTitle.setText("等待对方的新消息" if configured else "先设置，再开始")
-        self.emptyHint.setText("保持微信聊天窗口打开。\n收到新消息后，回复建议会出现在这里。"
+        self.emptyHint.setText("保持微信或 QQ 的聊天窗口打开。\n收到新消息后，回复建议会出现在这里。"
                                if configured else "配置模型和关系背景，\n让建议更贴近你们的对话。")
         self.setupButton.setVisible(not configured)
 
@@ -1115,11 +1119,11 @@ class Overlay:
         self.context.show()
 
     def current_chat(self):
-        """界面上正在看的会话（不一定是微信当前开着的那个）。"""
+        """界面上正在看的会话（不一定是聊天窗口当前开着的那个）。"""
         return self._shown
 
     def set_chat(self, title):
-        """微信切到了哪个会话：登记进下拉框并自动跟过去，不触发用户选择的回调。"""
+        """聊天窗口切到了哪个会话：登记进下拉框并自动跟过去，不触发用户选择的回调。"""
         if not title:
             return
         browsing = self._shown != self._chat  # 正看着的就是它、但之前是「浏览中」：也得重画，把填入放开
@@ -1141,7 +1145,7 @@ class Overlay:
         self.chatBox.blockSignals(False)
 
     def _on_chat_selected(self, index):
-        """用户自己挑了一个会话：只换看的内容，微信那边不动。"""
+        """用户自己挑了一个会话：只换看的内容，聊天窗口那边不动。"""
         title = self.chatBox.itemText(index)
         if title and title != self._shown:
             self._switch_to(title)
@@ -1198,11 +1202,11 @@ class Overlay:
         return self.atCheck.isChecked()
 
     def _follow_text(self):
-        self.chatFollow.setText(("跟随微信" if self._shown == self._chat else "浏览中") if self._chat else "")
+        self.chatFollow.setText(("跟随" if self._shown == self._chat else "浏览中") if self._chat else "")
 
     def show_cached(self, result):
         """把某个会话上次的结果放回界面；没有就回到空态。浏览别的会话时只给看不给填——
-        微信当前开着的不是它，填进去就串会话了。"""
+        聊天窗口当前开着的不是它，填进去就串会话了。"""
         if result:
             self.show(result)
         else:
@@ -1215,7 +1219,7 @@ class Overlay:
             self._empty_text()
         if self._shown != self._chat:
             self.invalidate_replies()
-            self.set_status(f"正在浏览「{self._shown}」，只看不填；微信切回它才能用。")
+            self.set_status(f"正在浏览「{self._shown}」，只看不填；切回这个会话才能填入。")
 
     def show(self, result):
         """按推荐顺序展示，按钮始终绑定 candidates 的原始索引。"""

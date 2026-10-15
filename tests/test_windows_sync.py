@@ -1,10 +1,13 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from integrations.jev_windows.app.bubble import is_self_bubble
 from integrations.jev_windows.app.cloud_ocr import CloudReader, parse_transcription
+from integrations.jev_windows.app.targets import APPS, ChatHit, choose_hit
 from integrations.jev_windows.core import experience
 from integrations.jev_windows.core.deepseek_strategy import parse_choice, parse_evidence
 from integrations.jev_windows.core.trend import load_csv
@@ -54,6 +57,60 @@ class WindowsSyncTest(unittest.TestCase):
                                       provider="deepseek", model="m", key="dummy")
         self.assertIn("接住邀约", text)
         self.assertIn("还需要确认时间", text)
+
+    def test_wechat_green_and_qq_blue_are_self_bubbles(self):
+        self.assertTrue(is_self_bubble((149, 236, 105)))
+        self.assertTrue(is_self_bubble((18, 183, 245)))
+        self.assertTrue(is_self_bubble((201, 231, 255)))
+        self.assertTrue(is_self_bubble((30, 100, 180)))
+        self.assertFalse(is_self_bubble((255, 255, 255)))
+        self.assertFalse(is_self_bubble((237, 237, 237)))
+
+    def test_foreground_qq_wins_over_previous_wechat(self):
+        wechat, qq = APPS
+        windows = [
+            ChatHit(2, qq, "QQ", 800 * 600),
+            ChatHit(1, wechat, "微信", 900 * 700),
+            ChatHit(3, qq, "图片查看器", 1200 * 800),
+        ]
+        self.assertEqual(choose_hit(windows, foreground_hwnd=2, prefer_hwnd=1).hwnd, 2)
+        self.assertEqual(choose_hit(windows, foreground_hwnd=3, prefer_hwnd=1).hwnd, 2)
+        self.assertEqual(choose_hit(windows, prefer_hwnd=1).hwnd, 1)
+        self.assertEqual(choose_hit(windows).hwnd, 2)
+
+    def test_settings_survive_a_fresh_read_and_keys_skip_the_broadcast(self):
+        import sys
+        windows = Path(__file__).resolve().parents[1] / "integrations" / "jev_windows"
+        sys.path.insert(0, str(windows))
+        from app import settings
+
+        previous = settings._CONFIG
+        os.environ.pop("GOUTOU_TEST_SETTINGS_KEY", None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                settings._CONFIG = os.path.join(directory, "config.json")
+                settings.save("friends", 8, jev_provider_text="openrouter", jev_model_text="jev-test",
+                              draft_provider_text="deepseek", draft_model_text="deepseek-flash",
+                              strategy_provider_text="jev", style_text="话少", reply_target_on=True,
+                              auto_analyze_on=False, thinking_on=False, check_update_on=False,
+                              ocr_provider_text="local")
+                settings._CONFIG = os.path.join(directory, "config.json")
+                self.assertEqual(settings.relationship(), "friends")
+                self.assertEqual(settings.context(), 8)
+                self.assertEqual(settings.style(), "话少")
+                self.assertEqual(settings.jev_model(), "jev-test")
+                self.assertTrue(settings.reply_target())
+                self.assertFalse(settings.check_update())
+            key = MagicMock()
+            key.__enter__.return_value = key
+            with patch("winreg.OpenKey", return_value=key), patch("winreg.SetValueEx") as set_value, \
+                    patch("ctypes.windll.user32.SendMessageTimeoutW", side_effect=AssertionError("broadcast")):
+                settings._set_key("GOUTOU_TEST_SETTINGS_KEY", "secret")
+            set_value.assert_called_once()
+            self.assertEqual(os.environ.get("GOUTOU_TEST_SETTINGS_KEY"), "secret")
+        finally:
+            settings._CONFIG = previous
+            os.environ.pop("GOUTOU_TEST_SETTINGS_KEY", None)
 
     def test_csv_requires_dates_and_calculates_direction_balance(self):
         with tempfile.TemporaryDirectory() as directory:

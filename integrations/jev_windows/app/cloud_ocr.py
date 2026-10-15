@@ -53,7 +53,7 @@ class CloudReader:
         image.save(out, format="JPEG", quality=82)
         data = out.getvalue()
         if len(data) > 10 * 1024 * 1024:
-            raise ValueError("聊天截图超过 10 MB；请缩小微信窗口")
+            raise ValueError("聊天截图超过 10 MB；请缩小聊天窗口")
         digest = hashlib.sha256(data).digest()
         if digest == self._digest:
             return self._cached

@@ -14,7 +14,7 @@ import traceback
 from collections import deque
 
 from app import settings, update, worker
-from app.capture import find_wechat_hwnd
+from app.capture import find_chat_window
 from app.fill import fill
 from app.overlay import Overlay
 from app.review import ReviewDialog
@@ -27,7 +27,8 @@ from core.experience import details as generate_details, explain as explain_cand
 # 只是缓冲区，实际喂模型几条由设置里的「参考上下文」决定
 # senders：这个群里发过言的人，去重、最近的排最前；target：用户挑的回复对象（None = 跟着最近那个走）
 chats = {}
-state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": "", "reviewing": False}
+state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "label": "聊天",
+         "chat": "", "reviewing": False}
 results = queue.Queue()
 extras = queue.Queue()
 update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
@@ -47,19 +48,20 @@ def target_of(title):
 
 
 def fill_reply(text):
+    label = state["label"]
     if state["hwnd"] is None:  # 子进程重开过，hwnd 可能换了，用最新的
-        raise RuntimeError("未找到微信窗口，请确认微信已打开")
+        raise RuntimeError(f"未找到{label}窗口，请确认微信或 QQ 已打开")
     if state["area"] is None:
-        raise RuntimeError("微信输入区域尚不可用，请确认微信聊天窗口可见（不要最小化）")
+        raise RuntimeError(f"{label}输入区域尚不可用，请确认聊天窗口可见（不要最小化）")
     if not state["chat"] or ov.current_chat() != state["chat"]:
-        raise RuntimeError("会话已切换，先核对当前微信会话再填入")
-    if find_wechat_hwnd() != state["hwnd"]:
-        raise RuntimeError("微信窗口已变化，等待采集更新后重试")
+        raise RuntimeError("会话已切换，先核对当前会话再填入")
+    if find_chat_window(state["hwnd"]).hwnd != state["hwnd"]:
+        raise RuntimeError(f"{label}窗口已变化，等待采集更新后重试")
     if settings.reply_target() and ov.at_prefix_enabled():
         target = target_of(ov.current_chat())  # 填进去的是界面上正看着的那个会话的对象
         if target:
-            text = f"@{target} " + text  # 纯文本，微信不认成真正的 @，只是让群里看得出在跟谁说
-    fill(state["hwnd"], state["area"], text)
+            text = f"@{target} " + text  # 纯文本，不会变成真正的 @，只是让群里看得出在跟谁说
+    fill(state["hwnd"], state["area"], text, label)
 
 
 def spawn_worker():
@@ -94,33 +96,94 @@ def on_debug_closed():
 
 
 def on_toggle_capture(on):
-    """标题栏开关。启动时没找到微信就没有子进程，这会儿再找一次，找到了才真开得起来。"""
+    """标题栏开关。启动时没找到聊天窗口就没有子进程，这会儿再找一次，找到了才真开得起来。"""
     global child
     if not on:
         capture_on.clear()
         return
     if child is None:
         try:
-            state["hwnd"] = find_wechat_hwnd()
+            _remember(find_chat_window())
         except RuntimeError:
-            ov.set_capture(False, "未找到微信窗口，打开微信后再开启采集")
+            ov.set_capture(False, "未找到微信或 QQ 窗口，打开后再开启采集")
             return
         child = spawn_worker()
     capture_on.set()
 
 
+def _remember(hit):
+    state["hwnd"] = hit.hwnd
+    state["label"] = hit.app["label"]
+
+
+def _stop_child():
+    """停掉采集子进程，并丢掉它留在队列里的消息。强杀之后队列可能已经坏了，读失败就停。"""
+    global child
+    proc = child
+    child = None
+    if proc is not None:
+        try:
+            proc.terminate()
+            proc.join(timeout=3)
+        except Exception:
+            pass
+    for _ in range(1000):
+        try:
+            q.get_nowait()
+        except Exception:
+            break
+
+
+def _switch_target(hit):
+    """采集绑死在启动时的 hwnd 上，换窗口就重开子进程。暂停中只换目标，不自己打开采集。"""
+    global child
+    was_on = capture_on.is_set()
+    capture_on.clear()
+    _stop_child()
+    _remember(hit)
+    state["area"] = None
+    child = spawn_worker()
+    if was_on:
+        capture_on.set()
+
+
+def follow_chat_window():
+    """大约每秒看一次前台。点到悬浮窗上不换；点到另一个微信或 QQ 窗口才换。"""
+    if child is None:
+        return
+    state["follow"] = state.get("follow", 0) + 1
+    if state["follow"] % 20:
+        return
+    try:
+        hit = find_chat_window(state["hwnd"])
+    except RuntimeError:
+        return
+    if hit.hwnd == state["hwnd"]:
+        return
+    previous = state["label"]
+    _switch_target(hit)
+    if hit.app["label"] != previous:
+        ov.set_status(f"已切到{hit.app['label']}", "success")
+
+
 def on_settings_saved():
-    """Refresh the child so newly saved OCR credentials are read immediately."""
+    """设置已经落盘。重开采集子进程，让它读到新的识图密钥；重开失败也不能把界面带走。"""
     global child
     if child is None:
         return
-    child.terminate()
-    child.join(timeout=3)
+    was_on = capture_on.is_set()
+    capture_on.clear()
+    hwnd = state["hwnd"]
+    _stop_child()
     state["area"] = None
     for chat in chats.values():
         chat["rev"] += 1
     ov.invalidate_replies()
+    if hwnd is None:
+        return
     child = spawn_worker()
+    if was_on:
+        capture_on.set()
     ov.set_status("设置已保存；识图服务已重新载入", "success")
 
 
@@ -246,7 +309,7 @@ def drain():
         if kind == "area":  # 只是窗口挪了位置，坐标跟着更新，别的什么都不用动
             state["area"] = msg[1]
             continue
-        if kind == "chat":  # 微信切了会话，界面跟过去（用户正浏览别的会话时也跟，微信是准的）
+        if kind == "chat":  # 聊天窗口切了会话，界面跟过去（用户正浏览别的会话时也跟）
             state["chat"] = msg[1]
             ov.set_chat(msg[1])
             continue
@@ -264,7 +327,7 @@ def drain():
         if kind == "resumed":  # 子进程重新开始采集
             ov.set_capture(True)
             continue
-        if kind == "dead":  # 采集彻底停了（微信关了之类），这才是真的要清状态
+        if kind == "dead":  # 采集彻底停了（聊天窗口关了之类），这才是真的要清状态
             state["area"] = None
             for c in chats.values():  # 在跑的分析作废，回来的结果不再往界面上贴
                 c["rev"] += 1
@@ -309,6 +372,7 @@ def drain():
 
 def tick():
     try:
+        follow_chat_window()
         drain()
         while not update_result.empty():
             latest, url = update_result.get()
@@ -374,9 +438,9 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
                  result_of=lambda t: chats.get(t, {}).get("result"))
     child = dbg = None
     try:
-        state["hwnd"] = find_wechat_hwnd()
+        _remember(find_chat_window())
     except RuntimeError:
-        ov.set_capture(False, "未找到微信窗口，打开微信后再开启采集")
+        ov.set_capture(False, "未找到微信或 QQ 窗口，打开后再开启采集")
     else:
         capture_on.set()
         child = spawn_worker()
