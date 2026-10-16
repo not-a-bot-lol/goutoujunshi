@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,6 +67,7 @@ class WindowsSyncTest(unittest.TestCase):
         self.assertFalse(is_self_bubble((255, 255, 255)))
         self.assertFalse(is_self_bubble((237, 237, 237)))
 
+    @unittest.skipUnless(sys.platform == "win32", "消息区定位依赖 Windows 上的 numpy")
     def test_same_color_sidebar_is_cut_at_the_vertical_line(self):
         import sys
         import numpy as np
@@ -82,6 +84,7 @@ class WindowsSyncTest(unittest.TestCase):
         self.assertGreaterEqual(area[0], 220)
         self.assertLess(area[0], 260)
 
+    @unittest.skipUnless(sys.platform == "win32", "消息区定位依赖 Windows 上的 numpy")
     def test_different_sidebar_color_stays_on_the_color_edge(self):
         import sys
         import numpy as np
@@ -109,10 +112,13 @@ class WindowsSyncTest(unittest.TestCase):
         self.assertEqual(choose_hit(windows, prefer_hwnd=1).hwnd, 1)
         self.assertEqual(choose_hit(windows).hwnd, 2)
 
+    @unittest.skipUnless(sys.platform == "win32", "设置写入走 Windows 注册表")
     def test_settings_survive_a_fresh_read_and_keys_skip_the_broadcast(self):
-        import sys
         windows = Path(__file__).resolve().parents[1] / "integrations" / "jev_windows"
         sys.path.insert(0, str(windows))
+        # Mac 测试会先把 jev_mac/core.py 装进 sys.modules，这里要让 Windows 的 core 包重新加载。
+        for name in [key for key in sys.modules if key == "core" or key.startswith("core.") or key == "app" or key.startswith("app.")]:
+            del sys.modules[name]
         from app import settings
 
         previous = settings._CONFIG

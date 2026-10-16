@@ -15,6 +15,7 @@ on:
       - "scripts/package_mac.py"
       - "PRIVACY.md"
       - "tests/test_platform_integrations.py"
+      - "tests/test_windows_sync.py"
       - ".github/workflows/platform-build.yml"
   pull_request:
     paths:
@@ -24,6 +25,7 @@ on:
       - "scripts/package_mac.py"
       - "PRIVACY.md"
       - "tests/test_platform_integrations.py"
+      - "tests/test_windows_sync.py"
       - ".github/workflows/platform-build.yml"
 
 permissions:
