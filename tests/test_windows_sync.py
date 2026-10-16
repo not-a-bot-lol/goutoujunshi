@@ -66,6 +66,37 @@ class WindowsSyncTest(unittest.TestCase):
         self.assertFalse(is_self_bubble((255, 255, 255)))
         self.assertFalse(is_self_bubble((237, 237, 237)))
 
+    def test_same_color_sidebar_is_cut_at_the_vertical_line(self):
+        import sys
+        import numpy as np
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations" / "jev_windows"))
+        from app.capture import chat_area
+
+        img = np.full((600, 900, 3), 34, np.uint8)
+        img[:40] = 18
+        img[:, 220:223] = 90
+        img[80:140, 40:180] = 200
+        area = chat_area(img)
+        self.assertIsNotNone(area)
+        self.assertGreaterEqual(area[0], 220)
+        self.assertLess(area[0], 260)
+
+    def test_different_sidebar_color_stays_on_the_color_edge(self):
+        import sys
+        import numpy as np
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations" / "jev_windows"))
+        from app.capture import chat_area
+
+        img = np.full((600, 900, 3), 237, np.uint8)
+        img[:, :250] = (32, 32, 32)
+        img[:40] = 20
+        area = chat_area(img)
+        self.assertIsNotNone(area)
+        self.assertGreaterEqual(area[0], 240)
+        self.assertLess(area[0], 280)
+
     def test_foreground_qq_wins_over_previous_wechat(self):
         wechat, qq = APPS
         windows = [

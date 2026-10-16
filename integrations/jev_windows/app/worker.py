@@ -51,6 +51,7 @@ def run(q, hwnd, enabled, debug_on):
             continue
         if cap is None:
             try:
+                unminimize(hwnd)  # 最小化的窗口建不起采集，先还原再绑 hwnd
                 cap = Capture(hwnd)
             except Exception as e:
                 q.put(("dead", "无法开始采集：" + (" ".join(str(e).split())[:120] or type(e).__name__)))

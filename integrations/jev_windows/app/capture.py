@@ -24,7 +24,27 @@ def _exe_of(pid):
     return os.path.basename(buf.value).lower() if ok else ""
 
 
+class _WINDOWPLACEMENT(ctypes.Structure):
+    _fields_ = (
+        ("length", w.UINT),
+        ("flags", w.UINT),
+        ("showCmd", w.UINT),
+        ("ptMinPosition", w.POINT),
+        ("ptMaxPosition", w.POINT),
+        ("rcNormalPosition", w.RECT),
+    )
+
+
 def _area(hwnd):
+    if u32.IsIconic(hwnd):
+        place = _WINDOWPLACEMENT()
+        place.length = ctypes.sizeof(place)
+        get_place = u32.GetWindowPlacement
+        get_place.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        get_place.restype = w.BOOL
+        if get_place(hwnd, ctypes.byref(place)):
+            rect = place.rcNormalPosition
+            return max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
     rect = w.RECT()
     if not u32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return 0
@@ -81,10 +101,29 @@ def unminimize(hwnd):
     return True
 
 
+def _pane_left(full, x0, x1):
+    """QQ 的图标栏、会话列表和聊天区常常是同一种灰，靠底色切不开，搜索框会被当成会话名。
+    两边颜色一样时，聊天区左边界是左侧那根贯穿上下的竖线。没有这种线就维持原 x0。"""
+    height, width = full.shape[:2]
+    if x0 > width * 0.12 or x1 - x0 < 200:
+        return x0
+    diff = np.abs(full[:, 1:].astype(int) - full[:, :-1].astype(int)).sum(2)
+    band = diff[height // 8: height * 7 // 8]
+    if band.size == 0:
+        return x0
+    strong = (band > 12).mean(0) >= 0.85
+    lifted = np.median(band, axis=0) >= 20
+    xs = np.where(strong & lifted)[0] + 1
+    limit = x1 - int(width * 0.45)
+    xs = [int(x) for x in xs if x0 + 40 <= x <= limit]
+    return xs[-1] if xs else x0
+
+
 def chat_area(full, header_h=60):
     """消息列表区 (x0, y_top, x1, y_in, 面板底色, y_pane)，全靠像素锚点，不写死坐标，深浅主题通用：
     - 面板底色 = 右半边最常见的颜色（抽样算，全量 np.unique 在 2560 宽的图上要半秒）
     - 面板左/右边界 = 第一/最后一根「底色占比 > 30%」的列（联系人列表是另一种底色，占比 0）
+    - 左右同色（QQ 这种）时，左边界改成左侧贯穿全高的竖线，避开图标栏和会话列表
     - y_pane = 面板第一行；会话名就印在 y_pane~y_top 这条头部里（公告条也在里面）
     - 横向分隔线 = 整行单色且非底色；输入框顶 y_in = 面板 45% 高度以下第一根；
       公告条下面那根（有的话）= 消息区顶 y_top，没有就用 header_h
@@ -98,6 +137,7 @@ def chat_area(full, header_h=60):
     col = isbg[H // 4: H * 3 // 4].mean(0)
     x0 = int(np.argmax(col > 0.3))
     x1 = W - int(np.argmax(col[::-1] > 0.3))
+    x0 = _pane_left(full, x0, x1)
     row = isbg[:, x0:x1].mean(1)
     y0 = int(np.argmax(row > 0.9))
     y1 = H - int(np.argmax(row[::-1] > 0.9))
@@ -113,8 +153,73 @@ def chat_area(full, header_h=60):
     return x0, y_top, x1, y_in, bg, y0
 
 
+def _window_box(hwnd):
+    """窗口在屏幕上的矩形。缩在任务栏上的不算。"""
+    if not u32.IsWindow(hwnd) or not u32.IsWindowVisible(hwnd) or u32.IsIconic(hwnd):
+        return None
+    rect = w.RECT()
+    if not u32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    width, height = rect.right - rect.left, rect.bottom - rect.top
+    if width < 200 or height < 200 or rect.left < -10000:
+        return None
+    return rect.left, rect.top, width, height
+
+
+def _grab_screen(left, top, width, height):
+    """从桌面合成画面里裁出这块矩形。QQ 有的窗口建不起 Graphics Capture，画面本身还在屏幕上。"""
+    gdi = ctypes.windll.gdi32
+    u32.GetDC.restype = ctypes.c_void_p
+    gdi.CreateCompatibleDC.restype = ctypes.c_void_p
+    gdi.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    gdi.CreateCompatibleBitmap.restype = ctypes.c_void_p
+    gdi.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    gdi.SelectObject.restype = ctypes.c_void_p
+    gdi.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi.BitBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                           ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    gdi.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
+                              ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+    gdi.DeleteObject.argtypes = [ctypes.c_void_p]
+    gdi.DeleteDC.argtypes = [ctypes.c_void_p]
+    u32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    hdc = u32.GetDC(0)
+    if not hdc:
+        raise RuntimeError("拿不到桌面设备")
+    mem = gdi.CreateCompatibleDC(hdc)
+    bmp = gdi.CreateCompatibleBitmap(hdc, width, height)
+    old = gdi.SelectObject(mem, bmp)
+    ok = gdi.BitBlt(mem, 0, 0, width, height, hdc, left, top, 0x00CC0020)
+
+    class _BMI(ctypes.Structure):
+        _fields_ = (
+            ("biSize", w.DWORD), ("biWidth", w.LONG), ("biHeight", w.LONG),
+            ("biPlanes", w.WORD), ("biBitCount", w.WORD), ("biCompression", w.DWORD),
+            ("biSizeImage", w.DWORD), ("biXPelsPerMeter", w.LONG), ("biYPelsPerMeter", w.LONG),
+            ("biClrUsed", w.DWORD), ("biClrImportant", w.DWORD),
+        )
+
+    info = _BMI()
+    info.biSize = ctypes.sizeof(info)
+    info.biWidth = width
+    info.biHeight = -height
+    info.biPlanes = 1
+    info.biBitCount = 32
+    buf = ctypes.create_string_buffer(width * height * 4)
+    rows = gdi.GetDIBits(mem, bmp, 0, height, buf, ctypes.byref(info), 0)
+    gdi.SelectObject(mem, old)
+    gdi.DeleteObject(bmp)
+    gdi.DeleteDC(mem)
+    u32.ReleaseDC(0, hdc)
+    if not ok or rows == 0:
+        raise RuntimeError("桌面裁图失败")
+    raw = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 4)
+    return np.ascontiguousarray(raw[:, :, 2::-1])
+
+
 class Capture:
-    """WGC 盯窗口。采集线程只做「跟上一帧比」；settled() 在画面停稳后交出整帧，中间帧（滚动动画、
+    """WGC 盯窗口。QQ 的有些窗口句柄建不起 Graphics Capture，就改从桌面把这块矩形裁下来。
+    采集线程只做「跟上一帧比」；settled() 在画面停稳后交出整帧，中间帧（滚动动画、
     新消息滑入的半截气泡）全跳过。动图表情永远停不稳，所以最多等 max_wait 秒照样交。"""
 
     def __init__(self, hwnd, settle=0.25, max_wait=1.0):
@@ -123,10 +228,20 @@ class Capture:
         self.settle, self.max_wait = settle, max_wait
         self.shape = self.area = self.last = self.pending = None
         self.t = self.t0 = 0.0
-        cap = WindowsCapture(window_hwnd=hwnd)  # cursor_capture/draw_border 留默认，老版 Win10 不支持切换会抛异常
-        cap.event(self.on_frame_arrived)
-        cap.event(self.on_closed)
-        self.ctl = cap.start_free_threaded()
+        self.hwnd = hwnd
+        self.ctl = None
+        self._box = None
+        try:
+            cap = WindowsCapture(window_hwnd=hwnd)  # cursor_capture/draw_border 留默认，老版 Win10 不支持切换会抛异常
+            cap.event(self.on_frame_arrived)
+            cap.event(self.on_closed)
+            self.ctl = cap.start_free_threaded()
+        except Exception:
+            box = _window_box(hwnd)
+            if box is None:
+                raise
+            _grab_screen(*box)  # 先裁一张，裁不到就还是把原来的错误抛出去
+            self._box = box
 
     def on_frame_arrived(self, frame, control):
         full = np.ascontiguousarray(frame.frame_buffer[:, :, :3][:, :, ::-1])  # BGRA → RGB；缓冲区回调后就没了，必须拷
@@ -151,6 +266,13 @@ class Capture:
 
     def settled(self):
         """停稳了就返回整帧，否则 None。"""
+        if self._box is not None:
+            try:
+                full = _grab_screen(*_window_box(self.hwnd) or self._box)
+            except Exception:
+                full = None
+            if full is not None and full.max() != 0:
+                self.on_frame_arrived(_RgbFrame(full), None)
         if self.pending is None:
             return None
         now = time.perf_counter()
@@ -160,10 +282,23 @@ class Capture:
         return full
 
     def alive(self):
+        if self._box is not None:
+            return u32.IsWindow(self.hwnd)
         return not self.ctl.is_finished()
 
     def stop(self):
-        self.ctl.stop()
+        if self.ctl is not None:
+            self.ctl.stop()
 
     def wait(self):
-        self.ctl.wait()  # 采集线程若是报错死的，这里把错误抛出来
+        if self.ctl is not None:
+            self.ctl.wait()  # 采集线程若是报错死的，这里把错误抛出来
+
+
+class _RgbFrame:
+    """让桌面裁图走和 WGC 帧同一条 on_frame_arrived。"""
+
+    def __init__(self, rgb):
+        bgra = np.zeros((*rgb.shape[:2], 4), np.uint8)
+        bgra[:, :, :3] = rgb[:, :, ::-1]
+        self.frame_buffer = bgra
