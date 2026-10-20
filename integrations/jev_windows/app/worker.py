@@ -9,7 +9,7 @@ import traceback
 import numpy as np
 
 from app.capture import Capture, chat_area, unminimize
-from app.ocr import Reader, read_title, similar
+from app.ocr import Reader, read_title, same_transcript, scroll_direction, similar
 from app import settings
 
 
@@ -38,6 +38,7 @@ def run(q, hwnd, enabled, debug_on):
     ctypes.windll.user32.SetProcessDPIAware()
     cap = None
     readers = {}  # {会话名: Reader}，一个会话一套去重状态
+    seen_screen = {}  # {会话名: [(who, text, name, y)]}，用来比较下一帧是上翻还是下翻
     title, head = "", None  # 当前会话名 / 上一帧的头部像素
     last_area = None  # 上次发给父进程的 4 元组，变了才再发一次
     warned = False  # 消息区识别失败是否已经报过，拖窗口时别每帧刷一条
@@ -102,9 +103,14 @@ def run(q, hwnd, enabled, debug_on):
                             readers[title] = CloudReader(ocr_provider, model, key)
                     reader = readers[title]
                     lines = reader.read(full[y0:y1, x0:x1], bg)
-                    new = reader.new_lines(lines)
-                    if new:
-                        q.put(("lines", title, new, rect))
+                    located = [(who, text, name, y) for who, name, text, y in lines if str(text).strip()]
+                    screen = [(who, text, name) for who, text, name, _ in located]
+                    previous = seen_screen.get(title, [])
+                    if screen and not same_transcript([(who, text) for who, text, _, _ in previous],
+                                                      [(who, text) for who, text, _ in screen]):
+                        direction = scroll_direction(previous, located)
+                        seen_screen[title] = located
+                        q.put(("lines", title, screen, rect, direction))
                 if debug_on.is_set():
                     q.put(("debug", _packet(full, area, title, reader, lines)))
         except Exception:

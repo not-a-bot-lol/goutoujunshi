@@ -5,7 +5,7 @@ from datetime import datetime
 from math import isfinite
 from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFrame, QHBoxLayout, QPlainTextEdit, QSizeGrip, QSizePolicy, QStackedWidget,
@@ -34,6 +34,25 @@ _RELATIONSHIPS = [
 
 def _choice(answers, name):
     return CHOICE_LABELS[name].get((answers.get(name) or {}).get("choice"), "暂未判断")
+
+
+class _RememberedKey(QObject):
+    """点进已记住的密钥框时清掉圆点，方便直接粘贴新密钥；没改就在离开时把圆点放回去。"""
+
+    def __init__(self, edit, stored):
+        super().__init__(edit)
+        self.edit = edit
+        self.stored = stored
+        edit.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is not self.edit:
+            return False
+        if event.type() == QEvent.Type.FocusIn and self.edit.text() == settings.REMEMBERED:
+            self.edit.clear()
+        elif event.type() == QEvent.Type.FocusOut and self.stored() and not self.edit.text().strip():
+            self.edit.setText(settings.REMEMBERED)
+        return False
 
 
 def _label(text="", size=14, color=None, bold=False, parent=None):
@@ -370,6 +389,23 @@ class Overlay:
         self.context.hide()
         body.addWidget(self.context)
 
+        self.rapport_of = {}
+        self.rapport = _Surface()
+        rapport_box = QVBoxLayout(self.rapport)
+        rapport_box.setContentsMargins(14, 12, 14, 12)
+        rapport_box.setSpacing(4)
+        rapport_box.addWidget(_label("这场对话", 12, _MUTED))
+        self.rapportGoal = _label("", 15, "#304c3c", True)
+        rapport_box.addWidget(self.rapportGoal)
+        self.rapportFavor = _label("", 15, "#304c3c", True)
+        rapport_box.addWidget(self.rapportFavor)
+        self.rapportNote = _label("", 11, _MUTED)
+        self.rapportNote.setWordWrap(True)
+        rapport_box.addWidget(self.rapportNote)
+        self.rapport.setToolTip("只根据当前读到的对话推测，切换会话会换成那一场的判断。")
+        self.rapport.hide()
+        body.addWidget(self.rapport)
+
         self.insight = _Surface()
         insight_box = QVBoxLayout(self.insight)
         insight_box.setContentsMargins(14, 12, 14, 12)
@@ -490,7 +526,7 @@ class Overlay:
         context_label.setBuddy(self.contextBox)
         box.addWidget(self.contextBox)
         box.addWidget(self._hint(
-            "生成和判断时看最近这么多条消息。太少会丢上下文，太多会稀释重点，建议 6–12。"
+            "往上或往下翻时按顺序接上，最多留这么多条，多出来的会顶掉。建议 6–12。"
         ))
         target_row = QHBoxLayout()
         target_row.addWidget(_label("群聊指定回复对象", 13), 1)
@@ -579,7 +615,9 @@ class Overlay:
         self.strategyKeyEdit = PasswordLineEdit()
         self.strategyKeyEdit.setPlaceholderText("DeepSeek 策略密钥；若回复也用 DeepSeek，可复用回复密钥")
         self.strategyKeyEdit.setAccessibleName("DeepSeek 策略密钥")
+        _RememberedKey(self.strategyKeyEdit, settings.strategy_key)
         box.addWidget(self.strategyKeyEdit)
+        box.addWidget(self._hint("密钥存在这台电脑的当前用户里。圆点表示已经记住，关掉再打开不用再填；要换就点进去粘贴新的。"))
         self._fetched = _Fetched()
         self._fetched.done.connect(self._models_fetched)
         self.jev = self._model_group(box, "Jev 判断（选 Jev 时使用）", "jev", providers.JEV_PROVIDERS)
@@ -620,6 +658,7 @@ class Overlay:
         self.ocrKeyEdit = PasswordLineEdit()
         self.ocrKeyEdit.setAccessibleName("图片识别密钥")
         self.ocrKeyEdit.setPlaceholderText("可单独填写；与回复来源相同时可复用回复密钥")
+        _RememberedKey(self.ocrKeyEdit, settings.ocr_key)
         ocr_box.addWidget(self.ocrKeyEdit)
         ocr_box.addWidget(self._hint("选择云端识图后，聊天区截图会发送到所选服务并可能计费；识别后仍需核对原文。"))
         body.addWidget(ocr)
@@ -635,7 +674,7 @@ class Overlay:
         self.saveButton.clicked.connect(self._save)
         actions.addWidget(self.saveButton)
         body.addLayout(actions)
-        body.addWidget(self._hint("保存后用于下一次生成的回复。"))
+        body.addWidget(self._hint("关系、模型和开关写在这台电脑上。密钥单独记住，下次打开不用再填。"))
         body.addStretch(1)
         self._load_settings()
 
@@ -679,10 +718,11 @@ class Overlay:
         group.keyEdit.setAccessibleName(f"{title} API 密钥")
         key_label.setBuddy(group.keyEdit)
         group.keyEdit.returnPressed.connect(self._save)
+        _RememberedKey(group.keyEdit, group.stored_key)
         box.addWidget(group.keyEdit)
         box.addWidget(self._hint(
-            "OpenRouter 的 key 或 TypeSafe 的 key，看上面选的来源。" if kind == "jev"
-            else "上面选哪家就填哪家的 key；换来源重填一次，只存这一把。"))
+            "OpenRouter 或 TypeSafe 的密钥，看上面选的来源。圆点表示这台电脑已记住。" if kind == "jev"
+            else "上面选哪家就填哪家的密钥。圆点表示这台电脑已记住，留着圆点再保存不会清掉。"))
         model_label = _label("模型", 13)
         box.addWidget(model_label)
         row = QHBoxLayout()
@@ -716,6 +756,13 @@ class Overlay:
         group.status.setText("")
         self._sync_model_fields()
 
+    def _show_remembered(self, edit, stored, force=False):
+        """有密钥就显示圆点。正在输入的新密钥不要盖掉，保存后强制换回圆点。"""
+        current = edit.text()
+        if not force and current.strip() and current != settings.REMEMBERED:
+            return
+        edit.setText(settings.REMEMBERED if stored else "")
+
     def _sync_model_fields(self):
         """两组共用：密钥已配置/未配置、占位文案、自定义 Base URL 行的显隐，
         外加紧凑模式下把来源按钮上的文字省略——ComboBox 是 QPushButton，
@@ -724,9 +771,10 @@ class Overlay:
             provider = self._provider_of(group)
             name = group.table[provider].name
             configured = bool(group.stored_key())
-            group.keyState.setText("已配置" if configured else "未配置")
+            group.keyState.setText("已记住" if configured else "未填写")
             group.keyEdit.setPlaceholderText(
-                "已配置，留空保留" if configured else f"输入 {name} API 密钥")
+                "已在这台电脑记住，要更换再粘贴" if configured else f"输入 {name} API 密钥")
+            self._show_remembered(group.keyEdit, configured)
             if self._compact:
                 name = group.providerBox.fontMetrics().elidedText(name, Qt.ElideRight, 180)
             group.providerBox.setText(name)
@@ -739,7 +787,7 @@ class Overlay:
         provider = self._provider_of(group)
         custom = group.kind == "draft" and provider in providers.CUSTOM
         base = self.baseEdit.text().strip() if custom else None
-        key = group.keyEdit.text().strip() or group.stored_key()
+        key = settings.key_to_save(group.keyEdit.text()) or group.stored_key()
         if not key:
             group.status.setText("先填密钥")
             return
@@ -803,14 +851,14 @@ class Overlay:
         self._set_group(self.jev, settings.jev_provider(), settings.jev_model())
         self.strategyProviderBox.setCurrentIndex(1 if settings.strategy_provider() == "deepseek" else 0)
         self.strategyModelEdit.setText(settings.strategy_model())
-        self.strategyKeyEdit.clear()
-        self.strategyKeyEdit.setPlaceholderText("已配置，留空保留" if settings.strategy_key() else
+        self.strategyKeyEdit.setPlaceholderText("已在这台电脑记住，要更换再粘贴" if settings.strategy_key() else
                                                 "DeepSeek 策略密钥；DeepSeek 回复可复用回复密钥")
+        self._show_remembered(self.strategyKeyEdit, bool(settings.strategy_key()), force=True)
         self.ocrProviderBox.setCurrentIndex(("local", "deepseek", "openrouter").index(settings.ocr_provider()))
         self.ocrModelEdit.setText(settings.ocr_model())
-        self.ocrKeyEdit.clear()
-        self.ocrKeyEdit.setPlaceholderText("已配置，留空保留" if settings.ocr_key() else
+        self.ocrKeyEdit.setPlaceholderText("已在这台电脑记住，要更换再粘贴" if settings.ocr_key() else
                                             "图片识别密钥；同来源的回复密钥可复用")
+        self._show_remembered(self.ocrKeyEdit, bool(settings.ocr_key()), force=True)
         self._ocr_changed()
         self._set_group(self.draft, settings.draft_provider(), settings.draft_model())
         self.baseEdit.setText(settings.draft_base_url())
@@ -858,24 +906,24 @@ class Overlay:
         if ocr_provider != "local" and not self.ocrModelEdit.text().strip():
             self._settings_feedback("请填写支持图片输入的识图模型。", error=True)
             return
-        if (ocr_provider != "local" and not self.ocrKeyEdit.text().strip()
+        if (ocr_provider != "local" and not settings.key_to_save(self.ocrKeyEdit.text())
                 and not settings.ocr_key() and not (ocr_provider == draft_provider and
-                (self.draft.keyEdit.text().strip() or settings.llm_key()))):
+                (settings.key_to_save(self.draft.keyEdit.text()) or settings.llm_key()))):
             self._settings_feedback("请填写图片识别密钥，或让识图与回复使用同一来源。", error=True)
             return
         if strategy_provider == "deepseek" and not self.strategyModelEdit.text().strip():
             self._settings_feedback("请填写 DeepSeek 策略模型。", error=True)
             return
-        if (strategy_provider == "deepseek" and not self.strategyKeyEdit.text().strip()
+        if (strategy_provider == "deepseek" and not settings.key_to_save(self.strategyKeyEdit.text())
                 and not settings.strategy_key() and not (
-                    draft_provider == "deepseek" and (self.draft.keyEdit.text().strip() or settings.llm_key()))):
+                    draft_provider == "deepseek" and (settings.key_to_save(self.draft.keyEdit.text()) or settings.llm_key()))):
             self._settings_feedback("请填写 DeepSeek 策略密钥。", error=True)
             return
         for group, provider in ((self.jev, jev_provider), (self.draft, draft_provider)):
             if group is self.jev and strategy_provider == "deepseek":
                 continue
             name = group.table[provider].name
-            if not group.keyEdit.text().strip() and not group.stored_key():
+            if not settings.key_to_save(group.keyEdit.text()) and not group.stored_key():
                 self._settings_feedback(f"请先填写 {group.keyTitle} 的 API 密钥。", error=True)
                 group.keyEdit.setFocus()
                 return
@@ -886,10 +934,10 @@ class Overlay:
         try:
             settings.save(relationship, self.contextBox.value(),
                           jev_provider_text=jev_provider,
-                          jev_key_text=self.jev.keyEdit.text().strip() or None,
+                          jev_key_text=settings.key_to_save(self.jev.keyEdit.text()),
                           jev_model_text=self.jev.modelBox.text().strip(),
                           draft_provider_text=draft_provider,
-                          llm_key_text=self.draft.keyEdit.text().strip() or None,
+                          llm_key_text=settings.key_to_save(self.draft.keyEdit.text()),
                           draft_model_text=self.draft.modelBox.text().strip(),
                           draft_base_url_text=base,
                           reply_target_on=self.targetSwitch.isChecked(),
@@ -898,10 +946,10 @@ class Overlay:
                           thinking_on=self.thinkingSwitch.isChecked(),
                           strategy_provider_text=strategy_provider,
                           strategy_model_text=self.strategyModelEdit.text().strip(),
-                          strategy_key_text=self.strategyKeyEdit.text().strip() or None,
+                          strategy_key_text=settings.key_to_save(self.strategyKeyEdit.text()),
                           ocr_provider_text=ocr_provider,
                           ocr_model_text=self.ocrModelEdit.text().strip(),
-                          ocr_key_text=self.ocrKeyEdit.text().strip() or None,
+                          ocr_key_text=settings.key_to_save(self.ocrKeyEdit.text()),
                           check_update_on=self.updateSwitch.isChecked())
         except Exception:
             self._settings_feedback("保存失败，请检查配置文件是否可写后重试。", error=True)
@@ -1094,6 +1142,32 @@ class Overlay:
         if follow:
             bar.setValue(bar.maximum())
 
+    def set_transcript(self, chat, rows):
+        """用这一屏从底端读出的消息整段替换原文。rows 是 [(who, text, name)]，旧的在前。"""
+        stamp = datetime.now().strftime("%H:%M")
+        lines = []
+        last_her = ""
+        for who, text, name in rows:
+            speaker = (name or "对方") if who == "her" else "我"
+            lines.append(f"{stamp}  {speaker}\n{text}\n")
+            if who == "her":
+                last_her = text
+        self.feeds[chat] = lines[-_LOG_LINES:]
+        self.counts[chat] = len(self.feeds[chat])
+        if last_her:
+            self.hers[chat] = last_her
+        self._add_chat(chat)
+        if chat != self._shown:
+            return
+        self.feed.clear()
+        for line in self.feeds[chat]:
+            self.feed.appendPlainText(line)
+        if last_her:
+            self._show_latest(last_her)
+        elif not rows:
+            self.context.hide()
+        self._history_title()
+
     def log_message(self, who, text, name="", timestamp=None, chat=None):
         """按会话存一份；只有正在看的那个会往显示区里写。"""
         chat = chat or self._shown
@@ -1164,6 +1238,7 @@ class Overlay:
         self._history_title()
         self._follow_text()
         self._render_targets()
+        self._render_rapport()
         self.show_cached(self.result_of(title) if self.result_of else None)
 
     def set_targets(self, chat, senders, current):
@@ -1221,9 +1296,30 @@ class Overlay:
             self.invalidate_replies()
             self.set_status(f"正在浏览「{self._shown}」，只看不填；切回这个会话才能填入。")
 
+    def set_rapport(self, chat, reading):
+        """记下某一场的对话目标和当前好感；正看着这场才立刻画出来。"""
+        if reading:
+            self.rapport_of[chat] = reading
+        else:
+            self.rapport_of.pop(chat, None)
+        if chat == self._shown:
+            self._render_rapport()
+
+    def _render_rapport(self):
+        reading = self.rapport_of.get(self._shown)
+        if not reading:
+            self.rapport.hide()
+            return
+        self.rapportGoal.setText("对话目标 · " + reading.get("goal", "还看不出来"))
+        self.rapportFavor.setText("当前好感 · " + reading.get("favor", "还看不出来"))
+        self.rapportNote.setText(reading.get("note", ""))
+        self.rapport.show()
+
     def show(self, result):
         """按推荐顺序展示，按钮始终绑定 candidates 的原始索引。"""
         self.cands = result["candidates"]
+        if result.get("rapport"):
+            self.set_rapport(self._shown, result["rapport"])
         self.set_busy(False)
         self._current = bool(self.cands)
         self._clear_cards()

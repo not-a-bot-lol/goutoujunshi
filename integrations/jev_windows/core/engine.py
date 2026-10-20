@@ -9,12 +9,14 @@ try:
     from .draft import draft_candidates
     from .jev_client import JevError, ask
     from .goutou import brief, explicit_boundary
+    from .rapport import read_rapport
     from .questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
     from .deepseek_strategy import decide as deepseek_decide, rank as deepseek_rank
 except ImportError:
     from draft import draft_candidates
     from jev_client import JevError, ask
     from goutou import brief, explicit_boundary
+    from rapport import read_rapport
     from questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
     from deepseek_strategy import decide as deepseek_decide, rank as deepseek_rank
 
@@ -53,9 +55,9 @@ def analyze(messages: list, relationship: str, model: str | None = None,
     state = build_state(messages, relationship, keep=context, reply_to=reply_to)
     if explicit_boundary(messages):
         reading = brief(messages, {})
-        return {"candidates": [], "best_index": None, "best_reply": None,
-                "scores": [], "answers": {}, "usage": {}, "reply_to": reply_to,
-                "goutou": reading}
+        return _finish({"candidates": [], "best_index": None, "best_reply": None,
+                        "scores": [], "answers": {}, "usage": {}, "reply_to": reply_to,
+                        "goutou": reading}, messages, {})
     if strategy_provider == "deepseek":
         decision = deepseek_decide(messages[-context:], relationship, strategy_model,
                                    strategy_key, timeout=timeout)
@@ -79,10 +81,11 @@ def analyze(messages: list, relationship: str, model: str | None = None,
             "stop_condition": "对方明确拒绝或要求停止联系时停止推进。",
             "evidence_note": ("DeepSeek 三次标签轮换的首 token 权重只用于策略相对选择；"
                               "判断把握不是对方真实意图概率，候选权重不是回复成功率。")}
-        return {"candidates": candidates, "best_index": best_index,
-                "best_reply": candidates[best_index] if best_index is not None else None,
-                "scores": scores, "answers": {}, "usage": {}, "reply_to": reply_to,
-                "goutou": reading, "strategy_decision": decision}
+        return _finish({"candidates": candidates, "best_index": best_index,
+                        "best_reply": candidates[best_index] if best_index is not None else None,
+                        "scores": scores, "answers": {}, "usage": {}, "reply_to": reply_to,
+                        "goutou": reading, "strategy_decision": decision},
+                       messages, {}, decision.get("strategy"))
     usage: dict = {}
     answers: dict = {}
     judged = False
@@ -100,9 +103,10 @@ def analyze(messages: list, relationship: str, model: str | None = None,
                                   reply_to=reply_to, style=style, thinking=thinking,
                                   guidance=guidance_text(answers) if judged else None)
     if not candidates:
-        return {"candidates": [], "best_index": None, "best_reply": None,
-                "scores": [], "answers": answers, "usage": usage,
-                "reply_to": reply_to, "goutou": brief(messages, answers)}
+        return _finish({"candidates": [], "best_index": None, "best_reply": None,
+                        "scores": [], "answers": answers, "usage": usage,
+                        "reply_to": reply_to, "goutou": brief(messages, answers)},
+                       messages, answers)
 
     questions = {} if judged else dict(JUDGE_QUESTIONS)
     if len(candidates) >= 2:  # 起草只给了 1 条就没什么可排的，判断题照问
@@ -131,7 +135,7 @@ def analyze(messages: list, relationship: str, model: str | None = None,
         except (TypeError, ValueError):
             scores[idx] = 0.0  # 脏数据一律按 0 处理
 
-    return {
+    return _finish({
         "candidates": candidates,
         "best_index": best_index,
         "best_reply": candidates[best_index],
@@ -140,4 +144,9 @@ def analyze(messages: list, relationship: str, model: str | None = None,
         "usage": usage,
         "reply_to": reply_to,
         "goutou": brief(messages, answers),
-    }
+    }, messages, answers)
+
+
+def _finish(result, messages, answers, strategy=None):
+    result["rapport"] = read_rapport(messages, answers, strategy)
+    return result

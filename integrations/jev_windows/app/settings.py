@@ -2,9 +2,8 @@
 """设置持久化。key 硬约束（docs/KICKOFF.md #6）：只进环境变量，绝不落文件；其余设置落 config.json。
 
 key 的持久化走 Windows 用户环境变量（注册表 HKCU\\Environment，跟 setx 写的是同一个地方）。
-全程只有两把本项目专用环境变量：GOUTOU_JEV_API_KEY、GOUTOU_LLM_API_KEY。
-读的时候先看进程环境，没有就直接读注册表——IDE 启动时把环境快照拿走了，之后再 Run 继承的还是旧环境，
-只靠 os.environ 会「保存了下次打开还是没有」。"""
+密钥记在当前 Windows 用户下，同一台电脑下次打开直接用，不用再填。
+读的时候以注册表为准。程序从桌面打开时会继承一份旧的环境快照，那份快照不能盖住后来保存的密钥。"""
 from __future__ import annotations
 
 import json
@@ -63,7 +62,7 @@ def relationship() -> str:
     return str(_read("relationship") or _DEFAULT_RELATIONSHIP)
 
 def context() -> int:
-    """参考上下文条数：起草和判断各看最近多少条消息。3~30，缺失/脏数据一律退默认值。"""
+    """上下翻动时按顺序最多留下多少条有用消息，多出来的会顶掉。起草和判断也看这几条。3~30。"""
     try:
         n = int(_read("context", _DEFAULT_CONTEXT))
     except (TypeError, ValueError):
@@ -177,19 +176,29 @@ def debug_view() -> bool:
     return bool(_read("debug_view", False))
 
 def _read_env(env_name: str) -> str:
-    """进程环境优先；没有就读注册表并带进进程环境，之后 core/ 里按 os.environ 读就有了。"""
-    v = os.environ.get(env_name, "").strip()
-    if not v:
-        try:
-            import winreg
+    """注册表里是上次保存的原文。进程环境可能是打开程序时继承的旧值，有注册表就用注册表。"""
+    try:
+        import winreg
 
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-                v = str(winreg.QueryValueEx(k, env_name)[0]).strip()
-        except Exception:  # 非 Windows / 没这个值
-            v = ""
-        if v:
-            os.environ[env_name] = v
-    return v
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+            stored = str(winreg.QueryValueEx(k, env_name)[0]).strip()
+    except Exception:  # 非 Windows / 没这个值
+        stored = ""
+    if stored:
+        os.environ[env_name] = stored
+        return stored
+    return os.environ.get(env_name, "").strip()
+
+REMEMBERED = "•" * 12  # 设置页里代表「这台电脑已经记住」，保存时不能当成新密钥写回去
+
+
+def key_to_save(typed: str | None) -> str | None:
+    """空着或仍是记住用的圆点 = 继续用这台电脑上已有的密钥。"""
+    text = (typed or "").strip()
+    if not text or text == REMEMBERED:
+        return None
+    return text
+
 
 def _get_key(env_name: str) -> str:
     """Only read this project's key slots; never inherit keys from upstream apps."""

@@ -17,9 +17,11 @@ from app import settings, update, worker
 from app.capture import find_chat_window
 from app.fill import fill
 from app.overlay import Overlay
+from app.ocr import fold_scroll, same_transcript
 from app.review import ReviewDialog
 from app.version import VERSION
 from core.engine import analyze
+from core.rapport import read_rapport
 from core.experience import details as generate_details, explain as explain_candidate, rewrite as rewrite_candidates
 
 # {会话名: {history, result, rev, target, senders}}：每个会话各自的上下文、上次结果和版本号，互不串味
@@ -341,24 +343,35 @@ def drain():
                 child.join()
                 child = None
             continue
-        _, title, new, area = msg
+        _, title, screen, area = msg[:4]
+        direction = msg[4] if len(msg) > 4 else ""
         state["area"] = area
+        if state["reviewing"]:  # 正在核对原文时不要把对话框下面的记录换掉
+            continue
         chat = chat_of(title)
-        chat["rev"] += 1  # 这个会话有新消息了，它在跑的分析作废
-        if title == ov.current_chat():  # 看的是别的会话就别把人家的候选划掉
-            ov.invalidate_replies()
-        for who, name, text in new:
+        # 记录留在主界面。上翻把新句子接到前面，下翻接到后面。
+        transcript = fold_scroll(list(chat["history"]), screen, settings.context(), direction)
+        if same_transcript([(who, text) for who, text, _name in chat["history"]],
+                           [(who, text) for who, text, _name in transcript]):
+            continue
+        chat["history"].clear()
+        chat["senders"].clear()
+        for who, text, name in transcript:
             chat["history"].append((who, text, name))
-            ov.log_message(who, text, name, chat=title)
             if who == "her" and name:  # 群里发过言的人，去重后最近的排最前
                 if name in chat["senders"]:
                     chat["senders"].remove(name)
                 chat["senders"].insert(0, name)
+        chat["rev"] += 1  # 这一屏原文换了，正在跑的分析作废
+        if title == ov.current_chat():
+            ov.invalidate_replies()
+        ov.set_transcript(title, transcript)
         ov.set_targets(title, chat["senders"], target_of(title))  # 显不显示这一行由悬浮窗按开关决定
-        if new[-1][0] == "her":  # 只有对方最新说话才值得分析
+        ov.set_rapport(title, read_rapport(list(chat["history"])))
+        if transcript and transcript[-1][0] == "her":  # 只有对方最新说话才值得分析
             msgs = list(chat["history"])
             if not settings.auto_analyze():
-                ov.set_status("已读取新消息，点“核对原文并分析”")
+                ov.set_status("已读取屏幕上的消息，点“核对原文并分析”")
             elif state["busy"]:
                 state["rerun"] = (title, msgs)
                 ov.set_busy(True)

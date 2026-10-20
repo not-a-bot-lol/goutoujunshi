@@ -11,6 +11,7 @@ from integrations.jev_windows.app.cloud_ocr import CloudReader, parse_transcript
 from integrations.jev_windows.app.targets import APPS, ChatHit, choose_hit
 from integrations.jev_windows.core import experience
 from integrations.jev_windows.core.deepseek_strategy import parse_choice, parse_evidence
+from integrations.jev_windows.core.rapport import read_rapport
 from integrations.jev_windows.core.trend import load_csv
 
 
@@ -58,6 +59,20 @@ class WindowsSyncTest(unittest.TestCase):
                                       provider="deepseek", model="m", key="dummy")
         self.assertIn("接住邀约", text)
         self.assertIn("还需要确认时间", text)
+
+    def test_rapport_reads_goal_and_favor_from_the_visible_chat(self):
+        cold = read_rapport([("her", "嗯"), ("me", "在吗"), ("her", "哦")])
+        self.assertEqual(cold["favor"], "偏冷")
+        self.assertEqual(cold["goal"], "接住对方刚才那句")
+        warm = read_rapport([("her", "好呀，周末想见你😊")])
+        self.assertEqual(warm["favor"], "比较热络")
+        self.assertEqual(warm["goal"], "把见面说具体")
+        asked = read_rapport([("her", "那你什么时候有空")],
+                             {"true_intent": {"choice": "request_action"}})
+        self.assertEqual(asked["goal"], "把对方要的事定下来")
+        stopped = read_rapport([("her", "不要再联系我")])
+        self.assertEqual((stopped["goal"], stopped["favor"]), ("先停止联系", "对方要求停止"))
+        self.assertEqual(read_rapport([("me", "在吗")])["favor"], "还看不出来")
 
     def test_wechat_green_and_qq_blue_are_self_bubbles(self):
         self.assertTrue(is_self_bubble((149, 236, 105)))
@@ -112,6 +127,72 @@ class WindowsSyncTest(unittest.TestCase):
         self.assertEqual(choose_hit(windows, prefer_hwnd=1).hwnd, 1)
         self.assertEqual(choose_hit(windows).hwnd, 2)
 
+    @unittest.skipUnless(sys.platform == "win32", "屏幕识别排序和 Windows 客户端一起跑")
+    def test_screen_text_follows_chat_order(self):
+        windows = Path(__file__).resolve().parents[1] / "integrations" / "jev_windows"
+        sys.path.insert(0, str(windows))
+        from app.ocr import reading_order
+
+        # 右边半句的角点更靠上；上面那条消息的第一个点却是它的底角。只按第一个点排序会读反。
+        same_line = [
+            ([[120, 8], [200, 8], [200, 28], [120, 28]], "右边", 0.9),
+            ([[10, 30], [10, 12], [90, 14], [90, 32]], "左边", 0.9),
+            ([[10, 36], [90, 36], [90, 70], [10, 70]], "第二句", 0.9),
+        ]
+        stacked = [
+            ([[10, 40], [10, 10], [80, 10], [80, 40]], "上面", 0.9),
+            ([[10, 36], [90, 36], [90, 70], [10, 70]], "下面", 0.9),
+        ]
+        self.assertEqual([item[5] for item in reading_order(same_line)], ["左边", "右边", "第二句"])
+        self.assertEqual([item[5] for item in reading_order(stacked)], ["上面", "下面"])
+        side_by_side = [
+            ([[400, 10], [520, 10], [520, 50], [400, 50]], "右侧", 0.9),
+            ([[10, 20], [100, 20], [100, 55], [10, 55]], "左侧", 0.9),
+        ]
+        self.assertEqual([item[5] for item in reading_order(side_by_side)], ["右侧", "左侧"])
+        from app.ocr import recent_from_bottom, should_replace_transcript
+        visible = [("her", None, "更早", 10), ("me", None, "", 20), ("her", None, "早", 40),
+                   ("me", None, "中", 70), ("her", None, "新", 100), ("me", None, "最新", 130)]
+        self.assertEqual([row[2] for row in recent_from_bottom(visible, 3)], ["中", "新", "最新"])
+        previous = [("her", "甲"), ("me", "乙"), ("her", "丙")]
+        self.assertFalse(should_replace_transcript(previous, [("her", "甲"), ("me", "乙")]))
+        self.assertFalse(should_replace_transcript(previous, previous))
+        self.assertTrue(should_replace_transcript(previous, [("me", "乙"), ("her", "甲"), ("her", "丙")]))
+        self.assertTrue(should_replace_transcript(previous, previous + [("me", "丁")]))
+        from app.ocr import fold_scroll
+        kept = fold_scroll(
+            [("her", "C", None), ("me", "D", None), ("her", "E", None), ("me", "F", None)],
+            [("her", "A", None), ("me", "B", None), ("her", "C", None), ("me", "D", None)], 4)
+        self.assertEqual([item[1] for item in kept], ["A", "B", "C", "D"])
+        kept = fold_scroll(
+            [("her", "A", None), ("me", "B", None), ("her", "C", None), ("me", "D", None)],
+            [("her", "C", None), ("me", "D", None), ("her", "E", None), ("me", "F", None)], 4)
+        self.assertEqual([item[1] for item in kept], ["C", "D", "E", "F"])
+        kept = fold_scroll(
+            [("her", "A", None), ("me", "B", None), ("her", "C", None)],
+            [("me", "B", None), ("her", "C", None)], 5)
+        self.assertEqual([item[1] for item in kept], ["A", "B", "C"])
+        kept = fold_scroll(
+            [("me", "D", None), ("her", "E", None), ("me", "F", None), ("her", "G", None)],
+            [("her", "A", None), ("me", "B", None), ("her", "C", None), ("me", "D", None), ("her", "E", None)], 4)
+        self.assertEqual([item[1] for item in kept], ["A", "B", "C", "D"])
+        kept = fold_scroll([("her", "已经记下", None)], [("me", "翻到新的", None)], 5)
+        self.assertEqual([item[1] for item in kept], ["已经记下", "翻到新的"])
+        kept = fold_scroll([("her", "不要死啊", None), ("me", "我尽量", None)],
+                           [("her", "不要死", None)], 5)
+        self.assertEqual([item[1] for item in kept], ["不要死啊", "我尽量"])
+        from app.ocr import scroll_direction
+        self.assertEqual(scroll_direction(
+            [("her", "锚", None, 100)], [("her", "锚", None, 180)]), "up")
+        self.assertEqual(scroll_direction(
+            [("her", "锚", None, 180)], [("her", "锚", None, 80)]), "down")
+        kept = fold_scroll([("her", "C", None), ("me", "D", None)],
+                           [("her", "A", None), ("me", "B", None)], 4, "up")
+        self.assertEqual([item[1] for item in kept], ["A", "B", "C", "D"])
+        kept = fold_scroll([("her", "A", None), ("me", "B", None)],
+                           [("her", "C", None), ("me", "D", None)], 4, "down")
+        self.assertEqual([item[1] for item in kept], ["A", "B", "C", "D"])
+
     @unittest.skipUnless(sys.platform == "win32", "设置写入走 Windows 注册表")
     def test_settings_survive_a_fresh_read_and_keys_skip_the_broadcast(self):
         windows = Path(__file__).resolve().parents[1] / "integrations" / "jev_windows"
@@ -121,6 +202,9 @@ class WindowsSyncTest(unittest.TestCase):
             del sys.modules[name]
         from app import settings
 
+        self.assertIsNone(settings.key_to_save("  "))
+        self.assertIsNone(settings.key_to_save(settings.REMEMBERED))
+        self.assertEqual(settings.key_to_save(" sk-abc "), "sk-abc")
         previous = settings._CONFIG
         os.environ.pop("GOUTOU_TEST_SETTINGS_KEY", None)
         try:
@@ -145,6 +229,10 @@ class WindowsSyncTest(unittest.TestCase):
                 settings._set_key("GOUTOU_TEST_SETTINGS_KEY", "secret")
             set_value.assert_called_once()
             self.assertEqual(os.environ.get("GOUTOU_TEST_SETTINGS_KEY"), "secret")
+            os.environ["GOUTOU_TEST_SETTINGS_KEY"] = "stale-not-typed"
+            with patch("winreg.OpenKey", return_value=key), patch("winreg.QueryValueEx", return_value=("sk-typed", 1)):
+                self.assertEqual(settings._read_env("GOUTOU_TEST_SETTINGS_KEY"), "sk-typed")
+            self.assertEqual(os.environ.get("GOUTOU_TEST_SETTINGS_KEY"), "sk-typed")
         finally:
             settings._CONFIG = previous
             os.environ.pop("GOUTOU_TEST_SETTINGS_KEY", None)
